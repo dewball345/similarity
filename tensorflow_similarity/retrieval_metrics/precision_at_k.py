@@ -19,7 +19,7 @@ from tensorflow_similarity.types import FloatTensor, IntTensor, BoolTensor
 
 
 class PrecisionAtK(RetrievalMetric):
-    """Precision@K is computed as.
+    r"""Precision@K is computed as.
 
     $$
     P_i@k = \frac{TP_i}{TP_i+FP_i} = \frac{\sum_{j = 1}^{k} {rel_i_j}}{K}
@@ -92,7 +92,7 @@ class PrecisionAtK(RetrievalMetric):
             p_at_k = tf.math.reduce_mean(per_example_p)
         elif self.average == "macro":
             per_class_metrics = 0
-            class_labels = tf.unique(query_labels)[0]
+            class_labels = tf.unique(tf.reshape(query_labels, (-1)))[0]
             for label in class_labels:
                 idxs = tf.where(query_labels == label)
                 c_slice = tf.gather(per_example_p, indices=idxs)

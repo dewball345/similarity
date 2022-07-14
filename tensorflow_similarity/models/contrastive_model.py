@@ -299,7 +299,6 @@ class ContrastiveModel(tf.keras.Model):
         loss_trackers = self.loss_trackers.values()
         return itertools.chain(loss_trackers, base_metrics)
 
-    @tf.function
     def train_step(self, data):
         view1, view2 = self._parse_views(data)
 
@@ -353,7 +352,6 @@ class ContrastiveModel(tf.keras.Model):
                 return_metrics[metric.name] = result
         return return_metrics
 
-    @tf.function
     def test_step(self, data):
         view1, view2 = self._parse_views(data)
 
@@ -404,17 +402,11 @@ class ContrastiveModel(tf.keras.Model):
             p2 = self.predictor(z2, training=training)
             l1 = self.compiled_loss(tf.stop_gradient(z1), p2)
             l2 = self.compiled_loss(tf.stop_gradient(z2), p1)
+            loss = l1 + l2
             pred1, pred2 = p1, p2
-        elif self.algorithm == "simclr":
-            l1 = self.compiled_loss(z1, z2)
-            l2 = self.compiled_loss(z2, z1)
+        elif self.algorithm in ["simclr", "barlow"]:
+            loss = self.compiled_loss(z1, z2)
             pred1, pred2 = z1, z2
-        elif self.algorithm == "barlow":
-            l1 = self.compiled_loss(z1, z2)
-            l2 = 0
-            pred1, pred2 = z1, z2
-
-        loss = l1 + l2
 
         return loss, pred1, pred2, z1, z2
 

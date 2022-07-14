@@ -12,36 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections import defaultdict
-from copy import copy
-import math
-from typing import DefaultDict, Dict, List, MutableMapping, Sequence, Union
+from typing import Dict, MutableMapping, Sequence, Union
 
 import numpy as np
 import tensorflow as tf
 from tqdm.auto import tqdm
 
-from .evaluator import Evaluator
 from tensorflow_similarity.classification_metrics import ClassificationMetric
-from tensorflow_similarity.matchers import ClassificationMatch
-from tensorflow_similarity.matchers import make_classification_matcher
+from tensorflow_similarity.matchers import (ClassificationMatch,
+                                            make_classification_matcher)
 from tensorflow_similarity.retrieval_metrics import RetrievalMetric
 from tensorflow_similarity.retrieval_metrics.utils import compute_match_mask
-from tensorflow_similarity.types import (
-        Lookup, CalibrationResults, IntTensor, FloatTensor)
-from tensorflow_similarity.utils import unpack_lookup_distances
-from tensorflow_similarity.utils import unpack_lookup_labels
+from tensorflow_similarity.types import (CalibrationResults, FloatTensor,
+                                         IntTensor, Lookup)
+from tensorflow_similarity.utils import (unpack_lookup_distances,
+                                         unpack_lookup_labels)
+
+from .evaluator import Evaluator
 
 
 class MemoryEvaluator(Evaluator):
     """In memory index performance evaluation and classification."""
 
     def evaluate_retrieval(
-            self,
-            target_labels: Sequence[int],
-            lookups: Sequence[Sequence[Lookup]],
-            retrieval_metrics: Sequence[RetrievalMetric],
-            distance_rounding: int = 8) -> Dict[str, np.ndarray]:
+        self,
+        target_labels: Sequence[int],
+        lookups: Sequence[Sequence[Lookup]],
+        retrieval_metrics: Sequence[RetrievalMetric],
+        distance_rounding: int = 8,
+    ) -> Dict[str, np.ndarray]:
         """Evaluates lookup performances against a supplied set of metrics
 
         Args:
@@ -60,26 +59,28 @@ class MemoryEvaluator(Evaluator):
             Dictionary of metric results where keys are the metric names and
             values are the metrics values.
         """
+        # we also convert to np.ndarray first to avoid a slow down if
+        # convert_to_tensor is called on a List.
+        query_labels = tf.convert_to_tensor(np.array(target_labels))
+
         # data preparation: flatten and rounding
         # lookups will be shape(num_queries, num_neighbors)
         # distances will be len(num_queries x num_neighbors)
-        nn_labels = unpack_lookup_labels(lookups)
-        distances = unpack_lookup_distances(lookups, distance_rounding)
+        nn_labels = unpack_lookup_labels(lookups, dtype=query_labels.dtype)
+        # TODO(ovallis): The float type should be derived from the model.
+        distances = unpack_lookup_distances(
+            lookups, dtype="float32", distance_rounding=distance_rounding
+        )
 
         lookup_set_size = tf.shape(nn_labels)[1]
         for m in retrieval_metrics:
             if lookup_set_size < m.k:
                 raise ValueError(
-                        f'Each query example returned {lookup_set_size} '
-                        f'neighbors, but retrieval metric {m.name} '
-                        f'requires the K >= {m.k}.')
+                    f"Each query example returned {lookup_set_size} "
+                    f"neighbors, but retrieval metric {m.name} "
+                    f"requires the K >= {m.k}."
+                )
 
-        # ensure the target labels are an int32 tensor
-        # we also convert to np.ndarray first to avoid a slow down if
-        # convert_to_tensor is called on a List.
-        if not tf.is_tensor(target_labels):
-            target_labels = tf.convert_to_tensor(np.array(target_labels))
-        query_labels: IntTensor = tf.cast(target_labels, dtype='int32')
         match_mask = compute_match_mask(query_labels, nn_labels)
 
         # compute metrics
@@ -89,7 +90,7 @@ class MemoryEvaluator(Evaluator):
                 query_labels=query_labels,
                 lookup_labels=nn_labels,
                 lookup_distances=distances,
-                match_mask=match_mask
+                match_mask=match_mask,
             )
             evaluation[m.name] = res.numpy()
 
@@ -104,7 +105,7 @@ class MemoryEvaluator(Evaluator):
         metrics: Sequence[ClassificationMetric],
         matcher: Union[str, ClassificationMatch],
         distance_rounding: int = 8,
-        verbose: int = 1
+        verbose: int = 1,
     ) -> Dict[str, np.ndarray]:
         """Evaluate the classification performance.
 
@@ -145,24 +146,27 @@ class MemoryEvaluator(Evaluator):
 
         # compute the tp, fp, tn, fn counts
         matcher.compute_count(
-                query_labels=query_labels,
-                lookup_labels=lookup_labels,
-                lookup_distances=lookup_distances)
+            query_labels=query_labels,
+            lookup_labels=lookup_labels,
+            lookup_distances=lookup_distances,
+        )
 
         # evaluating performance as distance value increase
         if verbose:
-            pb = tqdm(total=len(metrics), desc='Evaluating')
+            pb = tqdm(total=len(metrics), desc="Evaluating")
 
         # evaluating performance as distance value increase
-        results: Dict[str, np.ndarray] = (
-                {'distance': distance_thresholds.numpy()})
+        results: Dict[str, np.ndarray] = {
+            "distance": distance_thresholds.numpy()
+        }
         for m in metrics:
             res = m.compute(
-                    tp=matcher.tp,
-                    fp=matcher.fp,
-                    tn=matcher.tn,
-                    fn=matcher.fn,
-                    count=matcher.count)
+                tp=matcher.tp,
+                fp=matcher.fp,
+                tn=matcher.tn,
+                fn=matcher.fn,
+                count=matcher.count,
+            )
             results[m.name] = res.numpy()
 
             if verbose:
@@ -183,7 +187,7 @@ class MemoryEvaluator(Evaluator):
         extra_metrics: Sequence[ClassificationMetric] = [],
         distance_rounding: int = 8,
         metric_rounding: int = 6,
-        verbose: int = 1
+        verbose: int = 1,
     ) -> CalibrationResults:
         """Computes the distances thresholds that the classification must match to
         meet a fixed target.
@@ -223,31 +227,31 @@ class MemoryEvaluator(Evaluator):
         """
         # TODO (ovallis): Assert if index is empty, or if the lookup is empty.
         if len(lookups) == 0:
-            raise ValueError("lookups must not be empty. Is there no data in "
-                             "the index?")
+            raise ValueError(
+                "lookups must not be empty. Is there no data in the index?"
+            )
 
         # making a single list of metrics
         # Need expl covariance problem
         combined_metrics = list(extra_metrics)
         combined_metrics.append(calibration_metric)
 
+        # we also convert to np.ndarray first to avoid a slow down if
+        # convert_to_tensor is called on a List.
+        query_labels = tf.convert_to_tensor(np.array(target_labels))
+
         # data preparation: flatten and rounding
         # lookups will be shape(num_queries, num_neighbors)
         # distances will be len(num_queries x num_neighbors)
-        lookup_distances = unpack_lookup_distances(lookups, distance_rounding)
-        lookup_labels = unpack_lookup_labels(lookups)
-        # ensure the target labels are an int32 tensor
-        query_labels: IntTensor = tf.cast(
-                tf.convert_to_tensor(target_labels),
-                dtype='int32'
+        # TODO(ovallis): The float type should be derived from the model.
+        lookup_distances = unpack_lookup_distances(
+            lookups, dtype="float32", distance_rounding=distance_rounding
         )
+        lookup_labels = unpack_lookup_labels(lookups, dtype=query_labels.dtype)
 
         # the unique set of distance values sorted ascending
-        distance_thresholds = tf.sort(
-                tf.unique(
-                    tf.reshape(lookup_distances, (-1))
-                )[0]  # we only use the y output from tf.unique
-        )
+        unique_distances, _ = tf.unique(tf.reshape(lookup_distances, (-1)))
+        distance_thresholds = tf.sort(unique_distances)
 
         results = self.evaluate_classification(
             query_labels=query_labels,
@@ -257,113 +261,159 @@ class MemoryEvaluator(Evaluator):
             metrics=combined_metrics,
             matcher=matcher,
             distance_rounding=distance_rounding,
-            verbose=verbose)
+            verbose=verbose,
+        )
 
-        # pack results into one dict per dist_threshold
-        # TODO(ovallis): we can likey refactor the rest of this method to
-        # remove the need for this unpacking, but keeping it the same for now
-        # to ensure the code is working as expected.
-        evaluations = []
-        for i, dist in enumerate(distance_thresholds.numpy()):
-            ev = {'distance': results['distance'][i]}
-            for m in combined_metrics:
-                ev[m.name] = results[m.name][i]
+        cutpoints: Dict[str, Dict[str, Union[str, float]]] = {}
 
-            evaluations.append(ev)
+        cutpoints["optimal"] = self._optimal_cutpoint(
+            results, calibration_metric
+        )
 
-        # find the thresholds by going from right to left
+        for name, value in thresholds_targets.items():
+            target_cp = self._target_cutpoints(
+                results, calibration_metric, name, value
+            )
+            if target_cp:
+                cutpoints[name] = target_cp
 
-        # distances are rounded because of numerical instablity
-        # copy threshold targets as we are going to delete them and don't want
-        # to alter users supplied data
-        thresholds_targets = copy(thresholds_targets)
+        # Add the calibration metric as 'value' in the thresholds dict.
+        results['value'] = results[calibration_metric.name]
 
-        # which direction metric improvement is?
-        # !loop is right to left so max is decreasing and min is increasing
-        if calibration_metric.direction == 'max':
-            # we want the lowest value at the largest distance possible
-            cmp = self._is_lower
-            prev_value = math.inf  # python 3.x only
+        return CalibrationResults(cutpoints=cutpoints, thresholds=results)
+
+    def _optimal_cutpoint(
+        self,
+        metrics: Dict[str, np.ndarray],
+        calibration_metric: ClassificationMetric,
+    ) -> Dict[str, Union[str, float]]:
+        """Compute the optimal distance threshold for the calibration metric.
+
+        Args:
+            metrics: A mapping from metric name to a list of metric values
+              computed for each unique distance observed in the calibration
+              dataset. This dict should also include a distance key mapping
+              to the list of observed distances. We expect the distances to be
+              ascending, and for all lists to be the same length where each
+              index in the list corresponds to a distance in the distance list.
+            calibration_metric: The ClassificationMetric used for calibration.
+
+        Returns:
+            A Dict of the metric values at the calibrated distance. This also
+              includes the cutpoint name, the distance, and the value of the
+              calibration metric.
+
+              ```
+              {
+                  'name': 'optimal', # Cutpoint name
+                  'value': 0.99,     # Calibration metric at the cutpoint
+                  'distance': 0.1,   # Calibrated distance
+                  'precision': 0.99, # Here, we calibrated using precision
+                  'f1': 0.4,         # We also computed F1 at this point
+              }
+              ```
+        """
+        if calibration_metric.maximize:
+            idx = self._last_argmax(metrics[calibration_metric.name])
         else:
-            # we want the highest value at the largest distance possible
-            cmp = self._is_higher
-            prev_value = 0
+            idx = self._last_argmin(metrics[calibration_metric.name])
 
-        # we need a collection of list to apply vectorize operations and make
-        # the analysis / viz of the classification data signifcantly easier
-        thresholds: DefaultDict[str, List[Union[float, int]]] = defaultdict(list)  # noqa
-        cutpoints: DefaultDict[str, Dict[str, Union[str, float, int]]] = defaultdict(dict)  # noqa
-        num_distances = len(distance_thresholds)
+        optimal_cp = {
+            "name": "optimal",
+            "value": metrics[calibration_metric.name][idx].item(),
+        }
+        for metric_name in metrics.keys():
 
-        if verbose:
-            pb = tqdm(total=num_distances, desc='computing thresholds')
+            optimal_cp[metric_name] = metrics[metric_name][idx].item()
 
-        # looping from right to left as we want the max distance for a given
-        # metric value
-        for ridx in range(num_distances):
-            idx = num_distances - ridx - 1  # reversed
+        return optimal_cp
 
-            # Rounding the classification metric to create bins
-            curr_eval: Dict[str, float] = evaluations[idx]
-            classification_value = curr_eval[calibration_metric.name]
-            curr_value = round(classification_value, metric_rounding)
+    def _target_cutpoints(
+        self,
+        metrics: Dict[str, np.ndarray],
+        calibration_metric: ClassificationMetric,
+        target_name: str,
+        target_value: float,
+    ) -> Dict[str, Union[str, float]]:
+        """Compute the distance at the target metric for the calibration metric.
 
-            # ? if bug use this line check that the values evolve correclty.
-            # print(curr_value, prev_value, cmp(curr_value, prev_value))
+        Args:
+            metrics: A mapping from metric name to a list of metric values
+              computed for each unique distance observed in the calibration
+              dataset. This dict should also include a distance key mapping
+              to the list of observed distances. We expect the distances to be
+              ascending, and for all lists to be the same length where each
+              index in the list corresponds to a distance in the distance list.
+            calibration_metric: The ClassificationMetric used for calibration.
+            target_name: The name for the target cutpoint.
+            target_value: The target metric value.
 
-            if cmp(curr_value, prev_value):
+        Returns:
+            A Dict of the metric values at the calibrated distance. This also
+              includes the cutpoint name, the distance, and the value of the
+              calibration metric.
 
-                # add a new distance threshold
-                # cast numpy float32 to python float to make it json
-                # serializable
-                thresholds['value'].append(float(curr_value))
+              ```
+              {
+                  'name': '0.90',     # Target cutpoint name.
+                  'value': 0.901,     # Closest metric value at or above the
+                                      # target cutpoint, assuming we are
+                                      # maximizing the calibration metric.
+                  'distance': 0.1,    # Calibrated distance.
+                  'precision': 0.901, # Here, we calibrated using precision.
+                  'f1': 0.4,          # We also computed F1 at this point.
+              }
+              ```
+        """
+        indicators = np.where(metrics[calibration_metric.name] >= target_value)[
+            0
+        ]
+        target_cp: Dict[str, Union[str, float]] = {}
 
-                # ! the correct distance is already in the eval data
-                # record the value for all the metrics requested by the user
-                for key, val in curr_eval.items():
-                    # cast numpy float32 to python float to make it json
-                    # serializable
-                    thresholds[key].append(float(val))
+        if indicators.size > 0:
+            if calibration_metric.increasing:
+                # Take the first index above the target if the metric is increasing
+                idx = indicators[0]
+            else:
+                # Take the last index above the target if the metric is decreasing
+                idx = indicators[-1]
 
-                # update current threshold value
-                prev_value = curr_value
+            target_cp["name"] = target_name
+            target_cp["value"] = metrics[calibration_metric.name][idx].item()
+            for metric_name in metrics.keys():
+                target_cp[metric_name] = metrics[metric_name][idx].item()
 
-                # check if the current value meet or exceed threshold target
-                to_delete = []  # can't delete in an iteration loop
-                for name, value in thresholds_targets.items():
-                    if cmp(curr_value, value, equal=True):
-                        cutpoints[name] = {'name': name}  # useful for display
-                        for k in thresholds.keys():
-                            cutpoints[name][k] = thresholds[k][-1]
-                        to_delete.append(name)
+        return target_cp
 
-                # removing found targets to avoid finding lower value
-                # recall we go from right to left in the evaluation
-                for name in to_delete:
-                    del thresholds_targets[name]
+    def _last_argmax(self, x: np.ndarray) -> int:
+        """The index of the last occurrence of the max value.
 
-            if verbose:
-                pb.update()
+        In case of multiple occurrences of the maximum values, the index
+        corresponding to the last occurrence is returned.
 
-        if verbose:
-            pb.close()
+        Args:
+            A 1D np.ndarray or List[float].
 
-        # find the optimal cutpoint
-        if calibration_metric.direction == 'min':
-            best_idx = tf.math.argmin(thresholds[calibration_metric.name])
-        else:
-            best_idx = tf.math.argmax(thresholds[calibration_metric.name])
+        Returns:
+            The index of the last occurrence of the max value.
+        """
+        revx = x[::-1]
+        return (len(x) - np.argmax(revx) - 1).item()
 
-        # record its value
-        cutpoints['optimal'] = {'name': 'optimal'}  # useful for display
-        for k in thresholds.keys():
-            cutpoints['optimal'][k] = thresholds[k][best_idx]
+    def _last_argmin(self, x: np.ndarray) -> int:
+        """The index of the last occurrence of the min value.
 
-        # reverse the threshold so they go from left to right as user expect
-        for k in thresholds.keys():  # this syntax is need for mypy ...
-            thresholds[k].reverse()
+        In case of multiple occurrences of the minimum values, the index
+        corresponding to the last occurrence is returned.
 
-        return CalibrationResults(cutpoints=cutpoints, thresholds=thresholds)
+        Args:
+            A 1D np.ndarray or List[float].
+
+        Returns:
+            The index of the last occurrence of the min value.
+        """
+        revx = x[::-1]
+        return (len(x) - np.argmin(revx) - 1).item()
 
     def _is_lower(self, curr, prev, equal=False):
         if equal:

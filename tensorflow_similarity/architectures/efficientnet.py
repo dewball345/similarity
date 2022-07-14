@@ -15,11 +15,14 @@
 "EfficientNet backbone for similarity learning"
 import re
 from typing import Tuple
+
+import tensorflow as tf
 from tensorflow.keras import layers
 from tensorflow.keras.applications import efficientnet
-from tensorflow_similarity.layers import MetricEmbedding
-from tensorflow_similarity.layers import GeneralizedMeanPooling2D
+from tensorflow_similarity.layers import GeneralizedMeanPooling2D, MetricEmbedding
 from tensorflow_similarity.models import SimilarityModel
+
+from .utils import convert_sync_batchnorm
 
 EFF_INPUT_SIZE = {
     "B0": 224,
@@ -44,9 +47,8 @@ EFF_ARCHITECTURE = {
 }
 
 
-# Create an image augmentation pipeline.
 def EfficientNetSim(
-    input_shape: Tuple[int],
+    input_shape: Tuple[int, int, int],
     embedding_size: int = 128,
     variant: str = "B0",
     weights: str = "imagenet",
@@ -54,16 +56,15 @@ def EfficientNetSim(
     l2_norm: bool = True,
     include_top: bool = True,
     pooling: str = "gem",
-    gem_p=1.0,
+    gem_p=3.0,
 ) -> SimilarityModel:
-    """Build an EffecientNet Model backbone for similarity learning
+    """Build an EfficientNet Model backbone for similarity learning
 
-    Architecture from [EfficientNet: Rethinking Model Scaling for Convolutional Neural Networks](https://arxiv.org/abs/1905.11946)
+    [EfficientNet: Rethinking Model Scaling for Convolutional Neural Networks](https://arxiv.org/abs/1905.11946)
 
     Args:
-        input_shape: Size of the image input prior to augmentation,
-        must be bigger than the size of Effnet version you use. See below for
-        min input size.
+        input_shape: Size of the input image. Must match size of EfficientNet version you use.
+        See below for version input size.
 
         embedding_size: Size of the output embedding. Usually between 64
         and 512. Defaults to 128.
@@ -73,7 +74,7 @@ def EfficientNetSim(
         weights: Use pre-trained weights - the only available currently being
         imagenet. Defaults to "imagenet".
 
-        trainable: Make the EfficienNet backbone fully trainable or partially
+        trainable: Make the EfficientNet backbone fully trainable or partially
         trainable.
         - "full" to make the entire backbone trainable,
         - "partial" to only make the last 3 block trainable
@@ -99,9 +100,9 @@ def EfficientNetSim(
           The gem_p param sets the contrast amount on the pooling.
 
         gem_p: Sets the power in the GeneralizedMeanPooling2D layer. A value
-        of 1.0 is equivelent to GlobalMeanPooling2D, while larger values
+        of 1.0 is equivalent to GlobalMeanPooling2D, while larger values
         will increase the contrast between activations within each feature
-        map, and a value of math.inf will be equivelent to MaxPool2d.
+        map, and a value of math.inf will be equivalent to MaxPool2d.
 
     Note:
         EfficientNet expects images at the following size:
@@ -123,52 +124,50 @@ def EfficientNetSim(
     if variant not in EFF_INPUT_SIZE:
         raise ValueError("Unknown efficientnet variant. Valid B0...B7")
 
-    x = build_effnet(x, variant, weights, trainable)
+    x = build_effnet(variant, weights, trainable)(x)
 
-    if include_top:
+    if pooling == "gem":
         x = GeneralizedMeanPooling2D(p=gem_p, name="gem_pool")(x)
+    elif pooling == "avg":
+        x = layers.GlobalAveragePooling2D(name="avg_pool")(x)
+    elif pooling == "max":
+        x = layers.GlobalMaxPooling2D(name="max_pool")(x)
+
+    if include_top and pooling is not None:
         if l2_norm:
             outputs = MetricEmbedding(embedding_size)(x)
         else:
             outputs = layers.Dense(embedding_size)(x)
     else:
-        if pooling == "gem":
-            x = GeneralizedMeanPooling2D(p=gem_p, name="gem_pool")(x)
-        elif pooling == "avg":
-            x = layers.GlobalAveragePooling2D(name="avg_pool")(x)
-        elif pooling == "max":
-            x = layers.GlobalMaxPooling2D(name="max_pool")(x)
         outputs = x
 
     return SimilarityModel(inputs, outputs)
 
 
-def build_effnet(
-    x: layers.Layer, variant: str, weights: str, trainable: str
-) -> layers.Layer:
+def build_effnet(variant: str, weights: str = None, trainable: str = "full") -> tf.keras.Model:
     """Build the requested efficient net.
 
     Args:
-        x: The input layer to the efficientnet.
 
         variant: Which Variant of the EfficientNet to use.
 
         weights: Use pre-trained weights - the only available currently being
         imagenet.
 
-        trainable: Make the EfficienNet backbone fully trainable or partially
+        trainable: Make the EfficientNet backbone fully trainable or partially
         trainable.
         - "full" to make the entire backbone trainable,
         - "partial" to only make the last 3 block trainable
         - "frozen" to make it not trainable.
 
     Returns:
-        The ouptut layer of the efficientnet model
+        The output layer of the efficientnet model
     """
 
     # init
     effnet_fn = EFF_ARCHITECTURE[variant.upper()]
     effnet = effnet_fn(weights=weights, include_top=False)
+    effnet = convert_sync_batchnorm(effnet)
 
     if trainable == "full":
         effnet.trainable = True
@@ -179,17 +178,15 @@ def build_effnet(
             # Freeze all the layers before the the last 3 blocks
             if not re.search("^block[5,6,7]|^top", layer.name):
                 layer.trainable = False
-            # don't change the batchnorm weights
-            if isinstance(layer, layers.BatchNormalization):
-                layer.trainable = False
     elif trainable == "frozen":
         effnet.trainable = False
     else:
-        raise ValueError(
-            f"{trainable} is not a supported option for 'trainable'."
-        )
+        raise ValueError(f"{trainable} is not a supported option for 'trainable'.")
 
-    # wire
-    x = effnet(x)
+    # Don't train the BN layers if we are loading pre-trained weights.
+    if weights:
+        for layer in effnet.layers:
+            if isinstance(layer, layers.experimental.SyncBatchNormalization):
+                layer.trainable = False
 
-    return x
+    return effnet
